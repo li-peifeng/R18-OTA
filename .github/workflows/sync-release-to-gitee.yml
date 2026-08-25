@@ -193,7 +193,6 @@ jobs:
             -H 'Accept: application/json'
           )
           release_tag="${RELEASE_TAG}"
-          encoded_tag="$(jq -rn --arg value "${release_tag}" '$value | @uri')"
           release_id=''
           create_release=false
 
@@ -204,44 +203,36 @@ jobs:
             "${gitee_headers[@]}" \
             --output "${response_file}" \
             --write-out '%{http_code}' \
-            "${gitee_api_url}/releases/tags/${encoded_tag}")"
+            "${gitee_api_url}/releases?per_page=100&page=1")"
+          if [[ "${release_status}" != '200' ]] || \
+            ! jq -e 'type == "array"' "${response_file}" >/dev/null; then
+            echo "::error::Gitee Release list lookup failed with HTTP ${release_status}"
+            sed -n '1,80p' "${response_file}"
+            exit 1
+          fi
 
-          case "${release_status}" in
-            200)
-              if jq -e 'type == "object" and (.id != null)' "${response_file}" >/dev/null; then
-                release_id="$(jq -er '.id' "${response_file}")"
-                release_update_payload="$(jq -cn \
-                  --arg name "${release_name}" \
-                  --arg body "${release_body}" \
-                  --argjson prerelease "${release_prerelease}" \
-                  '{name: $name, body: $body, prerelease: $prerelease}')"
-                curl --fail --location --silent --show-error \
-                  --retry 3 --retry-all-errors \
-                  "${gitee_headers[@]}" \
-                  -H 'Content-Type: application/json' \
-                  --request PATCH \
-                  --data "${release_update_payload}" \
-                  "${gitee_api_url}/releases/${release_id}" \
-                  >/dev/null
-              elif jq -e 'type == "null"' "${response_file}" >/dev/null; then
-                # Gitee returns HTTP 200 with a JSON null when this tag has no
-                # Release yet, instead of returning HTTP 404.
-                create_release=true
-              else
-                echo "::error::Gitee returned an invalid Release lookup response"
-                sed -n '1,80p' "${response_file}"
-                exit 1
-              fi
-              ;;
-            404)
-              create_release=true
-              ;;
-            *)
-              echo "::error::Gitee release lookup failed with HTTP ${release_status}"
-              sed -n '1,80p' "${response_file}"
-              exit 1
-              ;;
-          esac
+          # The tag lookup endpoint can return JSON null even when a Release
+          # exists. Find the Release in the list instead so retries are safe.
+          release_id="$(jq -r --arg tag "${release_tag}" \
+            '[.[] | select(.tag_name == $tag) | .id][0] // empty' \
+            "${response_file}")"
+          if [[ -n "${release_id}" ]]; then
+            release_update_payload="$(jq -cn \
+              --arg name "${release_name}" \
+              --arg body "${release_body}" \
+              --argjson prerelease "${release_prerelease}" \
+              '{name: $name, body: $body, prerelease: $prerelease}')"
+            curl --fail --location --silent --show-error \
+              --retry 3 --retry-all-errors \
+              "${gitee_headers[@]}" \
+              -H 'Content-Type: application/json' \
+              --request PATCH \
+              --data "${release_update_payload}" \
+              "${gitee_api_url}/releases/${release_id}" \
+              >/dev/null
+          else
+            create_release=true
+          fi
 
           if [[ "${create_release}" == true ]]; then
             create_response_file="$(mktemp)"
