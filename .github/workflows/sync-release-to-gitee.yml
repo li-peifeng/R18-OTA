@@ -217,20 +217,10 @@ jobs:
             '[.[] | select(.tag_name == $tag) | .id][0] // empty' \
             "${response_file}")"
           if [[ -n "${release_id}" ]]; then
-            echo "Updating existing Gitee Release metadata" >&2
-            release_update_payload="$(jq -cn \
-              --arg name "${release_name}" \
-              --arg body "${release_body}" \
-              --argjson prerelease "${release_prerelease}" \
-              '{name: $name, body: $body, prerelease: $prerelease}')"
-            curl --fail --location --silent --show-error \
-              --retry 3 --retry-all-errors \
-              "${gitee_headers[@]}" \
-              -H 'Content-Type: application/json' \
-              --request PATCH \
-              --data "${release_update_payload}" \
-              "${gitee_api_url}/releases/${release_id}" \
-              >/dev/null
+            # Gitee currently returns HTTP 400 for updating an existing
+            # Release through this endpoint. Keep its already-created
+            # metadata and continue with the attachment reconciliation.
+            echo "Using existing Gitee Release ${release_id}" >&2
           else
             create_release=true
           fi
