@@ -14,13 +14,12 @@ concurrency:
 
 jobs:
   sync:
-    name: Mirror repository and release assets
+    name: Sync Gitee Release and assets
     runs-on: ubuntu-latest
     env:
       GITEE_REPOSITORY_URL: ${{ secrets.GITEE_REPOSITORY_URL }}
       GITEE_BRANCH: master
       RELEASE_TAG: ${{ github.event.release.tag_name }}
-      SOURCE_BRANCH: ${{ github.event.repository.default_branch }}
 
     steps:
       - name: Check Gitee token
@@ -45,7 +44,7 @@ jobs:
           ref: ${{ github.event.release.tag_name }}
           fetch-depth: 0
 
-      - name: Mirror the source branch and tags
+      - name: Mirror a sanitized source snapshot
         env:
           GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
           GITEE_REPOSITORY_URL: ${{ secrets.GITEE_REPOSITORY_URL }}
@@ -76,12 +75,21 @@ jobs:
             "${gitee_host}" \
             "${GITEE_TOKEN}" | git credential approve
 
-          git fetch --no-tags origin \
-            "refs/heads/${SOURCE_BRANCH}:refs/remotes/origin/${SOURCE_BRANCH}"
+          # Use the released tree but create a new root commit with a public
+          # GitHub Actions identity. This keeps hidden-email commits out of
+          # Gitee while preserving the source snapshot for OTA users.
+          snapshot_tree="$(git rev-parse 'HEAD^{tree}')"
+          snapshot_commit="$({
+            export GIT_AUTHOR_NAME='github-actions[bot]'
+            export GIT_AUTHOR_EMAIL='41898282+github-actions[bot]@users.noreply.github.com'
+            export GIT_COMMITTER_NAME='github-actions[bot]'
+            export GIT_COMMITTER_EMAIL='41898282+github-actions[bot]@users.noreply.github.com'
+            git commit-tree "${snapshot_tree}" -m "Sync ${RELEASE_TAG}"
+          })"
+
           git push --force gitee \
-            "refs/remotes/origin/${SOURCE_BRANCH}:refs/heads/${GITEE_BRANCH}"
-          git push --force gitee \
-            'refs/tags/*:refs/tags/*'
+            "${snapshot_commit}:refs/heads/${GITEE_BRANCH}" \
+            "${snapshot_commit}:refs/tags/${RELEASE_TAG}"
 
       - name: Sync the Gitee Release and assets
         env:
@@ -159,6 +167,9 @@ jobs:
           release_tag="${RELEASE_TAG}"
           encoded_tag="$(jq -rn --arg value "${release_tag}" '$value | @uri')"
           release_id=''
+
+          # The source snapshot above deliberately keeps GitHub's commit graph
+          # out of Gitee, so private author emails cannot block this Release.
 
           release_status="$(curl --silent --show-error \
             "${gitee_headers[@]}" \
