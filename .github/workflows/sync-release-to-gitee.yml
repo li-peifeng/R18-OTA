@@ -4,12 +4,18 @@ on:
   release:
     types:
       - published
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Release tag to synchronize
+        required: true
+        type: string
 
 permissions:
   contents: read
 
 concurrency:
-  group: sync-release-to-gitee-${{ github.event.release.tag_name }}
+  group: sync-release-to-gitee-${{ github.event.release.tag_name || inputs.release_tag }}
   cancel-in-progress: false
 
 jobs:
@@ -19,7 +25,7 @@ jobs:
     env:
       GITEE_REPOSITORY_URL: ${{ secrets.GITEE_REPOSITORY_URL }}
       GITEE_BRANCH: master
-      RELEASE_TAG: ${{ github.event.release.tag_name }}
+      RELEASE_TAG: ${{ github.event.release.tag_name || inputs.release_tag }}
 
     steps:
       - name: Check Gitee token
@@ -41,7 +47,7 @@ jobs:
       - name: Check out the released commit
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.release.tag_name }}
+          ref: ${{ env.RELEASE_TAG }}
           fetch-depth: 0
 
       - name: Mirror a sanitized source snapshot
@@ -113,6 +119,8 @@ jobs:
           gitee_api_url="${gitee_base_url}/api/v5/repos/${gitee_owner}/${gitee_repo}"
 
           event_file="${GITHUB_EVENT_PATH}"
+          release_event_file=''
+          release_response_file=''
           asset_dir="$(mktemp -d)"
           response_file="$(mktemp)"
           existing_assets_file="$(mktemp)"
@@ -124,8 +132,26 @@ jobs:
             rm -f "${response_file}" "${existing_assets_file}" \
               "${gitee_release_file}" "${expected_names_file}" \
               "${actual_names_file}"
+            [[ -z "${release_event_file}" ]] || rm -f "${release_event_file}"
+            [[ -z "${release_response_file}" ]] || rm -f "${release_response_file}"
           }
           trap cleanup EXIT
+
+          if [[ "${GITHUB_EVENT_NAME}" == 'workflow_dispatch' ]]; then
+            release_event_file="$(mktemp)"
+            release_response_file="$(mktemp)"
+            encoded_github_tag="$(jq -rn --arg value "${RELEASE_TAG}" '$value | @uri')"
+            curl --fail --location --silent --show-error \
+              --retry 3 --retry-all-errors \
+              -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+              -H 'Accept: application/vnd.github+json' \
+              --output "${release_response_file}" \
+              "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/releases/tags/${encoded_github_tag}"
+            jq -e --arg tag "${RELEASE_TAG}" '.tag_name == $tag' \
+              "${release_response_file}" >/dev/null
+            jq '{release: .}' "${release_response_file}" >"${release_event_file}"
+            event_file="${release_event_file}"
+          fi
 
           release_name="$(jq -r '.release.name // .release.tag_name' "${event_file}")"
           release_body="$(jq -r '.release.body // ""' "${event_file}")"
