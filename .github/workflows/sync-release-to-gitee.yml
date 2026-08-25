@@ -121,6 +121,7 @@ jobs:
           event_file="${GITHUB_EVENT_PATH}"
           release_event_file=''
           release_response_file=''
+          create_response_file=''
           asset_dir="$(mktemp -d)"
           response_file="$(mktemp)"
           existing_assets_file="$(mktemp)"
@@ -134,6 +135,7 @@ jobs:
               "${actual_names_file}"
             [[ -z "${release_event_file}" ]] || rm -f "${release_event_file}"
             [[ -z "${release_response_file}" ]] || rm -f "${release_response_file}"
+            [[ -z "${create_response_file}" ]] || rm -f "${create_response_file}"
           }
           trap cleanup EXIT
 
@@ -208,14 +210,17 @@ jobs:
             200)
               if jq -e 'type == "object" and (.id != null)' "${response_file}" >/dev/null; then
                 release_id="$(jq -er '.id' "${response_file}")"
+                release_update_payload="$(jq -cn \
+                  --arg name "${release_name}" \
+                  --arg body "${release_body}" \
+                  --argjson prerelease "${release_prerelease}" \
+                  '{name: $name, body: $body, prerelease: $prerelease}')"
                 curl --fail --location --silent --show-error \
                   --retry 3 --retry-all-errors \
                   "${gitee_headers[@]}" \
+                  -H 'Content-Type: application/json' \
                   --request PATCH \
-                  --data-urlencode "access_token=${GITEE_TOKEN}" \
-                  --data-urlencode "name=${release_name}" \
-                  --data-urlencode "body=${release_body}" \
-                  --data "prerelease=${release_prerelease}" \
+                  --data "${release_update_payload}" \
                   "${gitee_api_url}/releases/${release_id}" \
                   >/dev/null
               elif jq -e 'type == "null"' "${response_file}" >/dev/null; then
@@ -239,18 +244,37 @@ jobs:
           esac
 
           if [[ "${create_release}" == true ]]; then
-            create_response="$(curl --fail --location --silent --show-error \
+            create_response_file="$(mktemp)"
+            release_create_payload="$(jq -cn \
+              --arg tag "${release_tag}" \
+              --arg name "${release_name}" \
+              --arg body "${release_body}" \
+              --argjson prerelease "${release_prerelease}" \
+              --arg target "${GITEE_BRANCH}" \
+              '{tag_name: $tag, name: $name, body: $body, prerelease: $prerelease, target_commitish: $target}')"
+            if ! create_status="$(curl --location --silent --show-error \
               --retry 3 --retry-all-errors \
               "${gitee_headers[@]}" \
+              -H 'Content-Type: application/json' \
+              --output "${create_response_file}" \
+              --write-out '%{http_code}' \
               --request POST \
-              --data-urlencode "access_token=${GITEE_TOKEN}" \
-              --data-urlencode "tag_name=${release_tag}" \
-              --data-urlencode "name=${release_name}" \
-              --data-urlencode "body=${release_body}" \
-              --data "prerelease=${release_prerelease}" \
-              --data-urlencode "target_commitish=${GITEE_BRANCH}" \
-              "${gitee_api_url}/releases")"
-            release_id="$(jq -er '.id' <<<"${create_response}")"
+              --data "${release_create_payload}" \
+              "${gitee_api_url}/releases")"; then
+              echo "::error::Unable to contact Gitee while creating the Release"
+              sed -n '1,120p' "${create_response_file}"
+              exit 1
+            fi
+            if [[ "${create_status}" != 2* ]]; then
+              echo "::error::Gitee Release creation failed with HTTP ${create_status}"
+              sed -n '1,120p' "${create_response_file}"
+              exit 1
+            fi
+            if ! release_id="$(jq -er '.id' "${create_response_file}")"; then
+              echo "::error::Gitee Release creation returned no Release id"
+              sed -n '1,120p' "${create_response_file}"
+              exit 1
+            fi
           fi
 
           # Re-runs are safe: replace all attachments of this same Release so
