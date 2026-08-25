@@ -217,6 +217,7 @@ jobs:
             '[.[] | select(.tag_name == $tag) | .id][0] // empty' \
             "${response_file}")"
           if [[ -n "${release_id}" ]]; then
+            echo "Updating existing Gitee Release metadata" >&2
             release_update_payload="$(jq -cn \
               --arg name "${release_name}" \
               --arg body "${release_body}" \
@@ -277,10 +278,12 @@ jobs:
           jq -e 'type == "array"' "${existing_assets_file}" >/dev/null
           while IFS=$'\t' read -r attachment_id attachment_name; do
             [[ -n "${attachment_id}" ]] || continue
+            echo "Removing existing Gitee attachment: ${attachment_name}" >&2
             curl --fail --location --silent --show-error \
               --retry 3 --retry-all-errors \
               "${gitee_headers[@]}" \
               --request DELETE \
+              --data-urlencode "access_token=${GITEE_TOKEN}" \
               "${gitee_api_url}/releases/${release_id}/attach_files/${attachment_id}" \
               >/dev/null
           done < <(
@@ -290,6 +293,7 @@ jobs:
 
           while IFS=$'\t' read -r asset_name _asset_url _expected_size; do
             [[ -n "${asset_name}" ]] || continue
+            echo "Uploading Gitee attachment: ${asset_name}" >&2
             curl --fail --location --silent --show-error \
               --retry 3 --retry-all-errors \
               "${gitee_headers[@]}" \
@@ -318,6 +322,7 @@ jobs:
             "${event_file}" | LC_ALL=C sort >"${expected_names_file}"
           jq -r '.[] | [.name, (.size // -1)] | @tsv' \
             "${existing_assets_file}" | LC_ALL=C sort >"${actual_names_file}"
+          echo "Verifying Gitee attachment names and sizes" >&2
           if ! diff -u "${expected_names_file}" "${actual_names_file}"; then
             echo "::error::Gitee release assets or sizes do not match the GitHub Release"
             exit 1
