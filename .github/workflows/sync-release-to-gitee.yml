@@ -167,6 +167,7 @@ jobs:
           release_tag="${RELEASE_TAG}"
           encoded_tag="$(jq -rn --arg value "${release_tag}" '$value | @uri')"
           release_id=''
+          create_release=false
 
           # The source snapshot above deliberately keeps GitHub's commit graph
           # out of Gitee, so private author emails cannot block this Release.
@@ -177,19 +178,41 @@ jobs:
             --write-out '%{http_code}' \
             "${gitee_api_url}/releases/tags/${encoded_tag}")"
 
-          if [[ "${release_status}" == '200' ]]; then
-            release_id="$(jq -er '.id' "${response_file}")"
-            curl --fail --location --silent --show-error \
-              --retry 3 --retry-all-errors \
-              "${gitee_headers[@]}" \
-              --request PATCH \
-              --data-urlencode "access_token=${GITEE_TOKEN}" \
-              --data-urlencode "name=${release_name}" \
-              --data-urlencode "body=${release_body}" \
-              --data "prerelease=${release_prerelease}" \
-              "${gitee_api_url}/releases/${release_id}" \
-              >/dev/null
-          elif [[ "${release_status}" == '404' ]]; then
+          case "${release_status}" in
+            200)
+              if jq -e 'type == "object" and (.id != null)' "${response_file}" >/dev/null; then
+                release_id="$(jq -er '.id' "${response_file}")"
+                curl --fail --location --silent --show-error \
+                  --retry 3 --retry-all-errors \
+                  "${gitee_headers[@]}" \
+                  --request PATCH \
+                  --data-urlencode "access_token=${GITEE_TOKEN}" \
+                  --data-urlencode "name=${release_name}" \
+                  --data-urlencode "body=${release_body}" \
+                  --data "prerelease=${release_prerelease}" \
+                  "${gitee_api_url}/releases/${release_id}" \
+                  >/dev/null
+              elif jq -e 'type == "null"' "${response_file}" >/dev/null; then
+                # Gitee returns HTTP 200 with a JSON null when this tag has no
+                # Release yet, instead of returning HTTP 404.
+                create_release=true
+              else
+                echo "::error::Gitee returned an invalid Release lookup response"
+                sed -n '1,80p' "${response_file}"
+                exit 1
+              fi
+              ;;
+            404)
+              create_release=true
+              ;;
+            *)
+              echo "::error::Gitee release lookup failed with HTTP ${release_status}"
+              sed -n '1,80p' "${response_file}"
+              exit 1
+              ;;
+          esac
+
+          if [[ "${create_release}" == true ]]; then
             create_response="$(curl --fail --location --silent --show-error \
               --retry 3 --retry-all-errors \
               "${gitee_headers[@]}" \
@@ -202,10 +225,6 @@ jobs:
               --data-urlencode "target_commitish=${GITEE_BRANCH}" \
               "${gitee_api_url}/releases")"
             release_id="$(jq -er '.id' <<<"${create_response}")"
-          else
-            echo "::error::Gitee release lookup failed with HTTP ${release_status}"
-            sed -n '1,80p' "${response_file}"
-            exit 1
           fi
 
           # Re-runs are safe: replace all attachments of this same Release so
